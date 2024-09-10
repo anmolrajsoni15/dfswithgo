@@ -3,7 +3,6 @@ package p2p
 import (
 	"fmt"
 	"net"
-	"sync"
 )
 
 // TCPPeer represents the remote node over a TCP established connection.
@@ -23,35 +22,48 @@ func NewTCPPeer(conn net.Conn, outbound bool) *TCPPeer {
 	}
 }
 
-type TCPTransport struct {
-	listenAddress string
-	listener      net.Listener
-	shakeHands HandshakeFunc
-	decoder 	Decoder
-
-	mu    sync.RWMutex
-	peers map[net.Addr]Peer
+// close implements the peer interface.
+func (p *TCPPeer) Close() error {
+	return p.conn.Close()
 }
 
-func NewTCPTransport(listenAddr string) *TCPTransport {
+type TCPTransportOpts struct {
+	ListenAddr    string
+	HandshakeFunc HandshakeFunc
+	Decoder       Decoder
+	OnPeer        func(Peer) error
+}
+
+type TCPTransport struct {
+	TCPTransportOpts
+	listener net.Listener
+	rpcch    chan RPC
+}
+
+func NewTCPTransport(opts TCPTransportOpts) *TCPTransport {
 	return &TCPTransport{
-		shakeHands: NOPHandshakeFunc,
-		listenAddress: listenAddr,
-		peers:         make(map[net.Addr]Peer),
+		TCPTransportOpts: opts,
+		rpcch:            make(chan RPC),
 	}
+}
+
+// consume implements the Transport interface, which will ruturn read-only channel
+// for reading the incoming messages received from another peer in the network.
+func (t *TCPTransport) Consume() <-chan RPC {
+	return t.rpcch
 }
 
 func (t *TCPTransport) ListenAndAccept() error {
 	var err error
 
-	t.listener, err = net.Listen("tcp", t.listenAddress)
+	t.listener, err = net.Listen("tcp", t.ListenAddr)
 	if err != nil {
 		panic(err)
 	}
 
 	go t.startAcceptLoop()
 
-	fmt.Printf("Listening on %s\n", t.listenAddress)
+	fmt.Printf("Listening on %s\n", t.ListenAddr)
 	return nil
 }
 
@@ -68,19 +80,34 @@ func (t *TCPTransport) startAcceptLoop() {
 	}
 }
 
-type Temp struct {}
-
 func (t *TCPTransport) handleConn(conn net.Conn) {
+	var err error
+
+	defer func() {
+		fmt.Printf("dropping peer connection: %v\n", err)
+		conn.Close()
+	}()
+
 	peer := NewTCPPeer(conn, true)
 
-	if err := t.shakeHands(peer); err != nil {
+	if err = t.HandshakeFunc(peer); err != nil {
+		return
 	}
 
-	msg := &Temp{}
+	if t.OnPeer != nil {
+		if err = t.OnPeer(peer); err != nil {
+			return
+		}
+	}
+
+	rpc := RPC{}
 	for {
-		if err := t.decoder.Decode(conn, msg); err != nil {
+		if err := t.Decoder.Decode(conn, &rpc); err != nil {
 			fmt.Printf("Error decoding message: %v\n", err)
 			continue
 		}
+
+		rpc.From = conn.RemoteAddr()
+		t.rpcch <- rpc
 	}
 }

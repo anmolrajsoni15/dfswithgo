@@ -2,8 +2,10 @@ package p2p
 
 // Peer is an interface that represents a peer in the network.
 type Peer interface {
+	Close() error
 }
 
 type Transport interface {
 	ListenAndAccept() error
+	Consume() <-chan RPC
 }
