@@ -2,65 +2,71 @@ package main
 
 import (
 	"bytes"
-	"io"
+	"fmt"
+	"io/ioutil"
 	"testing"
 )
 
 func TestPathTransformFunc(t *testing.T) {
-	key := "bestpictureshaiye"
-	pathkey := CASPathTransformFunc(key)
-	expectedOriginalKey := "97c1910a9d07e491e3a8c5e8bac04d5c41f6fd7d"
-	expectedPathName := "97c19/10a9d/07e49/1e3a8/c5e8b/ac04d/5c41f/6fd7d"
-	if pathkey.Pathname != expectedPathName {
-		t.Errorf("Expected %s, got %s", expectedPathName, pathkey.Pathname)
-	}
-	if pathkey.Filename != expectedOriginalKey {
-		t.Errorf("Expected %s, got %s", expectedOriginalKey, pathkey.Filename)
-	}
-}
-
-func TestStoreDeleteKey(t *testing.T) {
-	opts := StoreOpts{
-		PathTransformFunc: CASPathTransformFunc,
+	key := "momsbestpicture"
+	pathKey := CASPathTransformFunc(key)
+	expectedFilename := "6804429f74181a63c50c3d81d733a12f14a353ff"
+	expectedPathName := "68044/29f74/181a6/3c50c/3d81d/733a1/2f14a/353ff"
+	if pathKey.PathName != expectedPathName {
+		t.Errorf("have %s want %s", pathKey.PathName, expectedPathName)
 	}
 
-	s := NewStore(opts)
-	key := "specialpicture"
-	data := []byte("some data")
-	if err := s.writeStream(key, bytes.NewReader(data)); err != nil {
-		t.Error(err)
-	}
-
-	if err := s.Delete(key); err != nil {
-		t.Error(err)
+	if pathKey.Filename != expectedFilename {
+		t.Errorf("have %s want %s", pathKey.Filename, expectedFilename)
 	}
 }
 
 func TestStore(t *testing.T) {
+	s := newStore()
+	id := generateID()
+	defer teardown(t, s)
+
+	for i := 0; i < 50; i++ {
+		key := fmt.Sprintf("foo_%d", i)
+		data := []byte("some jpg bytes")
+
+		if _, err := s.writeStream(id, key, bytes.NewReader(data)); err != nil {
+			t.Error(err)
+		}
+
+		if ok := s.Has(id, key); !ok {
+			t.Errorf("expected to have key %s", key)
+		}
+
+		_, r, err := s.Read(id, key)
+		if err != nil {
+			t.Error(err)
+		}
+
+		b, _ := ioutil.ReadAll(r)
+		if string(b) != string(data) {
+			t.Errorf("want %s have %s", data, b)
+		}
+
+		if err := s.Delete(id, key); err != nil {
+			t.Error(err)
+		}
+
+		if ok := s.Has(id, key); ok {
+			t.Errorf("expected to NOT have key %s", key)
+		}
+	}
+}
+
+func newStore() *Store {
 	opts := StoreOpts{
 		PathTransformFunc: CASPathTransformFunc,
 	}
+	return NewStore(opts)
+}
 
-	s := NewStore(opts)
-	key := "specialpicture"
-	data := []byte("some data")
-	if err := s.writeStream(key, bytes.NewReader(data)); err != nil {
+func teardown(t *testing.T, s *Store) {
+	if err := s.Clear(); err != nil {
 		t.Error(err)
 	}
-
-	if ok := s.Has(key); !ok {
-		t.Errorf("Expected key %s to exist", key)
-	}
-
-	r, err := s.Read(key)
-	if err != nil {
-		t.Error(err)
-	}
-
-	b, _ := io.ReadAll(r)
-	if string(b) != string(data) {
-		t.Errorf("Expected %s, got %s", data, b)
-	}
-
-	s.Delete(key)
 }

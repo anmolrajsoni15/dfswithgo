@@ -1,9 +1,6 @@
 package main
 
 import (
-	// "bytes"
-	// "crypto/md5"
-	"bytes"
 	"crypto/sha1"
 	"encoding/hex"
 	"errors"
@@ -14,7 +11,7 @@ import (
 	"strings"
 )
 
-const defaultRootFoldername = "storehai"
+const defaultRootFolderName = "anmolrajsoni15"
 
 func CASPathTransformFunc(key string) PathKey {
 	hash := sha1.Sum([]byte(key))
@@ -22,7 +19,6 @@ func CASPathTransformFunc(key string) PathKey {
 
 	blocksize := 5
 	sliceLen := len(hashStr) / blocksize
-
 	paths := make([]string, sliceLen)
 
 	for i := 0; i < sliceLen; i++ {
@@ -31,7 +27,7 @@ func CASPathTransformFunc(key string) PathKey {
 	}
 
 	return PathKey{
-		Pathname: strings.Join(paths, "/"),
+		PathName: strings.Join(paths, "/"),
 		Filename: hashStr,
 	}
 }
@@ -39,12 +35,12 @@ func CASPathTransformFunc(key string) PathKey {
 type PathTransformFunc func(string) PathKey
 
 type PathKey struct {
-	Pathname string
+	PathName string
 	Filename string
 }
 
 func (p PathKey) FirstPathName() string {
-	paths := strings.Split(p.Pathname, "/")
+	paths := strings.Split(p.PathName, "/")
 	if len(paths) == 0 {
 		return ""
 	}
@@ -52,18 +48,18 @@ func (p PathKey) FirstPathName() string {
 }
 
 func (p PathKey) FullPath() string {
-	return fmt.Sprintf("%s/%s", p.Pathname, p.Filename)
+	return fmt.Sprintf("%s/%s", p.PathName, p.Filename)
 }
 
 type StoreOpts struct {
-	//root is the folder name of the root, containing all the files.
+	// Root is the folder name of the root, containing all the folders/files of the system.
 	Root              string
 	PathTransformFunc PathTransformFunc
 }
 
 var DefaultPathTransformFunc = func(key string) PathKey {
 	return PathKey{
-		Pathname: key,
+		PathName: key,
 		Filename: key,
 	}
 }
@@ -76,9 +72,8 @@ func NewStore(opts StoreOpts) *Store {
 	if opts.PathTransformFunc == nil {
 		opts.PathTransformFunc = DefaultPathTransformFunc
 	}
-
 	if len(opts.Root) == 0 {
-		opts.Root = defaultRootFoldername
+		opts.Root = defaultRootFolderName
 	}
 
 	return &Store{
@@ -86,68 +81,83 @@ func NewStore(opts StoreOpts) *Store {
 	}
 }
 
-func (s *Store) Has(key string) bool {
+func (s *Store) Has(id string, key string) bool {
 	pathKey := s.PathTransformFunc(key)
-	fullPathWithRoot := fmt.Sprintf("%s/%s", s.Root, pathKey.FullPath())
+	fullPathWithRoot := fmt.Sprintf("%s/%s/%s", s.Root, id, pathKey.FullPath())
+
 	_, err := os.Stat(fullPathWithRoot)
-	if errors.Is(err, os.ErrNotExist) {
-		return false
-	}
-	return true
+	return !errors.Is(err, os.ErrNotExist)
 }
 
-func (s *Store) Delete(key string) error {
+func (s *Store) Clear() error {
+	return os.RemoveAll(s.Root)
+}
+
+func (s *Store) Delete(id string, key string) error {
 	pathKey := s.PathTransformFunc(key)
 
 	defer func() {
 		log.Printf("deleted [%s] from disk", pathKey.Filename)
 	}()
 
-	firstPathNameWithRoot := fmt.Sprintf("%s/%s", s.Root, pathKey.FirstPathName())
+	firstPathNameWithRoot := fmt.Sprintf("%s/%s/%s", s.Root, id, pathKey.FirstPathName())
 
 	return os.RemoveAll(firstPathNameWithRoot)
 }
 
-func (s *Store) Read(key string) (io.Reader, error) {
-	f, err := s.readStream(key)
+func (s *Store) Write(id string, key string, r io.Reader) (int64, error) {
+	return s.writeStream(id, key, r)
+}
+
+func (s *Store) WriteDecrypt(encKey []byte, id string, key string, r io.Reader) (int64, error) {
+	f, err := s.openFileForWriting(id, key)
 	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	n, err := copyDecrypt(encKey, r, f)
+	return int64(n), err
+}
+
+func (s *Store) openFileForWriting(id string, key string) (*os.File, error) {
+	pathKey := s.PathTransformFunc(key)
+	pathNameWithRoot := fmt.Sprintf("%s/%s/%s", s.Root, id, pathKey.PathName)
+	if err := os.MkdirAll(pathNameWithRoot, os.ModePerm); err != nil {
 		return nil, err
 	}
-	defer f.Close()
 
-	buf := new(bytes.Buffer)
-	_, err = io.Copy(buf, f)
+	fullPathWithRoot := fmt.Sprintf("%s/%s/%s", s.Root, id, pathKey.FullPath())
 
-	return buf, err
+	return os.Create(fullPathWithRoot)
 }
 
-func (s *Store) readStream(key string) (io.ReadCloser, error) {
-	pathKey := s.PathTransformFunc(key)
-	fullPathWithRoot := fmt.Sprintf("%s/%s", s.Root, pathKey.FullPath())
-	return os.Open(fullPathWithRoot)
-}
-
-func (s *Store) writeStream(key string, r io.Reader) error {
-	pathKey := s.PathTransformFunc(key)
-	pathNameWithRoot := fmt.Sprintf("%s/%s", s.Root, pathKey.Pathname)
-	if err := os.MkdirAll(pathNameWithRoot, os.ModePerm); err != nil {
-		return err
-	}
-
-	pathAndFilename := pathKey.FullPath()
-	fullPathWithRoot := fmt.Sprintf("%s/%s", s.Root, pathAndFilename)
-
-	f, err := os.Create(fullPathWithRoot)
+func (s *Store) writeStream(id string, key string, r io.Reader) (int64, error) {
+	f, err := s.openFileForWriting(id, key)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer f.Close()
+	return io.Copy(f, r)
+}
 
-	n, err := io.Copy(f, r)
+func (s *Store) Read(id string, key string) (int64, io.Reader, error) {
+	return s.readStream(id, key)
+}
+
+func (s *Store) readStream(id string, key string) (int64, io.ReadCloser, error) {
+	pathKey := s.PathTransformFunc(key)
+	fullPathWithRoot := fmt.Sprintf("%s/%s/%s", s.Root, id, pathKey.FullPath())
+
+	file, err := os.Open(fullPathWithRoot)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 
-	log.Printf("Wrote %d bytes to %s\n", n, fullPathWithRoot)
-	return nil
+	fi, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return 0, nil, err
+	}
+
+	return fi.Size(), file, nil
 }
